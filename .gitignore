@@ -1,9 +1,9 @@
 # Dependencies
 node_modules/
 
-# SQLite
-database.sqlite
-*.db
+## SQLite
+#database.sqlite
+#*.db
 
 # Environment variables
 .env
