@@ -1,5 +1,12 @@
 # Originallay checker v1.0.0 
 ## Описание:
+##### Тестовый деплой сервиса:
+https://originality-checker.onrender.com 
+
+В папке publications сейчас для тестов находится один единственный файл: `test-123`
+
+##### Временный authorization token:
+`e704be9a691601ee99a6a483f07f3655c0cbed54e9588ce17abd5ec11fa0c5bf`
 
 ### Архитектура:
 - Установка соединения 1С с веб-ресурсом происходит по статическому `Bearer` токену,
