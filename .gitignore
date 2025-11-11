@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+# SQLite
+database.sqlite
+*.db
+
 # Environment variables
 .env
 .env.local
