@@ -135,7 +135,7 @@ app.get('/publications/:file_id', async (req, res) => {
             return res.status(404).send('Printable form not found');
         }
         if (rec.file_type !== 'actual') {
-            // История — файл есть но отмечен как deleted
+            // История — файл есть, но отмечен как deleted
             return res.status(410).send('The printed form is not relevant');
         }
         const filePath = path.join(PUBLIC_DIR, `${file_id}.pdf`);
