@@ -68,13 +68,13 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
         const storedPath = path.join(PUBLIC_DIR, storedFilename);
         const now = (new Date()).toISOString();
 
-        // 1) Если в БД уже есть запись с этим file_id (actual) -> перезаписываем и ставим fulfilled
-        const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = 'actual'`);
+        // 1) Если в БД уже есть запись с этим file_id
+        const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
 
         if (existingByFileId) {
             // перезаписываем файл на диск
 
-            const isActual = await get(`SELECT * FROM publications WHERE file_type = ?`, [file_id]);
+            const isActual = await get(`SELECT * FROM publications WHERE file_type = 'actual'`);
 
             // Если файл уже есть в базе,
             if (isActual) {
