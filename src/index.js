@@ -74,7 +74,7 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
         if (existingByFileId) {
             // перезаписываем файл на диск
 
-            const isActual = await get(`SELECT * FROM publications WHERE file_type = 'actual'`);
+            const isActual = await get(`SELECT * FROM publications WHERE file_type = 'actual' AND file_id = ?`, [file_id]);
 
             // Если файл уже есть в базе,
             if (isActual) {
@@ -117,7 +117,7 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
 
             await logAction('upload', req, file_id);
             const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
-            return res.json({ message: 'replaced old file (by document_id) with new file_id', file_id, link });
+            return res.json({ message: 'replaced old file (by document_id) with new file_id (pending QR)', file_id, link });
         }
 
         // 3) Ничего не найдено — это первая публикация для данного !document_id и file_id.
