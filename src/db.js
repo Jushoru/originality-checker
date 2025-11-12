@@ -11,7 +11,7 @@ db.serialize(() => {
     document_id TEXT,
     file_type TEXT,       -- "actual" OR "deleted"
     date_of_creation TEXT,
-    status TEXT,          -- "pending" OR "fullfiled"
+    status TEXT,          -- "pending" OR "fulfilled"
     mime_type TEXT
   )`);
 

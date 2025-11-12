@@ -68,14 +68,14 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
         const storedPath = path.join(PUBLIC_DIR, storedFilename);
         const now = (new Date()).toISOString();
 
-        // 1) Если в БД уже есть запись с этим file_id (actual) -> перезаписываем и ставим fullfiled
+        // 1) Если в БД уже есть запись с этим file_id (actual) -> перезаписываем и ставим fulfilled
         const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
 
         if (existingByFileId) {
             // перезаписываем файл на диск
             await fs.promises.writeFile(storedPath, file.buffer);
             await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
-                [now, 'fullfiled', mime_type || 'pdf', 'actual', file_id]);
+                [now, 'fulfilled', mime_type || 'pdf', 'actual', file_id]);
 
             await logAction('upload', req, file_id);
             // возвращаем ссылку, которая не меняется (file_id в URL)
