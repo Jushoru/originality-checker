@@ -73,9 +73,24 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
 
         if (existingByFileId) {
             // перезаписываем файл на диск
+
+            const isActual = await get(`SELECT * FROM publications WHERE file_type = ?`, [file_id]);
+
+            // Если файл уже есть в базе,
+            if (isActual) {
+                // файл актуальный, значит он pending, значит обновляем статус на fullfiled
+                await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
+                    [now, 'fulfilled', mime_type || 'pdf', 'actual', file_id]);
+            } else {
+                // файл не актуальный, значит он deleted, значит помечаем actual файл как deleted, новый как actual и pending
+                await run(`UPDATE publications SET file_type = 'deleted' WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
+
+                await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
+                    [now, 'pending', mime_type || 'pdf', 'actual', file_id]);
+            }
+
             await fs.promises.writeFile(storedPath, file.buffer);
-            await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
-                [now, 'fulfilled', mime_type || 'pdf', 'actual', file_id]);
+
 
             await logAction('upload', req, file_id);
             // возвращаем ссылку, которая не меняется (file_id в URL)
@@ -105,7 +120,7 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
             return res.json({ message: 'replaced old file (by document_id) with new file_id', file_id, link });
         }
 
-        // 3) Ничего не найдено — это первая публикация для данного document_id и file_id.
+        // 3) Ничего не найдено — это первая публикация для данного !document_id и file_id.
         // Сохраняем файл и помечаем status = pending (т.к. ожидаем возвращённый PDF с QR)
         await fs.promises.writeFile(storedPath, file.buffer);
         await run(`INSERT INTO publications (file_id, document_id, file_type, date_of_creation, status, mime_type) VALUES (?, ?, ?, ?, ?, ?)`,
