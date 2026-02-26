@@ -15,8 +15,9 @@ https://originality-checker.onrender.com
 - Простое логирование через библиотеку `Morgan` с фильтрацией заголовка `authorization`, чтобы
 токен не попадал в логи. В логах отображается кто когда какой запрос сделал, посредством
 использования встроенного формата `morgan('combined')`. Вывод логов в консоль при локальной разработке.
-- Прием файлов осуществляется через `multer (multipart/form-data)`, с осуществлением валидации
-по MIME типу PDF (и JPG в дальнейшем)
+- Прием файлов поддерживает **два формата**:
+  - `multipart/form-data` через `multer` (legacy)
+  - `application/json` (файл в base64) для совместимости с 1С
 - Есть БД `sqlite3`, состоящая из двух таблиц: `logs` и `publications`, хранящиеся в файле - `database.sqlite`.
    
 
@@ -38,14 +39,59 @@ https://originality-checker.onrender.com
 
 
 ## API документация:
-### Ограничения:
-- В запросе `post /api/upload` можно передавать только PDF файлы
-- Файл не должен превышать размер в 50Мб
+### Ограничения
+- Для загрузки PDF доступны два endpoint'а:
+    - `POST /api/upload` — **multipart/form-data** (legacy)
+    - `POST /api/upload-json` — **application/json** (base64) (**рекомендуется для 1С**)
+- Максимальный размер PDF: **50MB** (проверяется по декодированным байтам)
+- Для `/api/upload-json` размер JSON-тела должен быть меньше лимита парсера (сейчас настроен запас, см. `src/index.js`)
 
 ### Доступные запросы:
+---
+
+1) `POST /api/upload-json` (рекомендуется для 1С)
+
+#### Заголовки
+- `Authorization: Bearer <STATIC_TOKEN>`
+- `Content-Type: application/json`
+
+#### Тело запроса (JSON)
+| Поле          | Тип данных | Required | Описание |
+|--------------|------------|----------|----------|
+| `file`       | string     | true     | PDF в base64. Допускается также формат `data:application/pdf;base64,<...>` |
+| `document_id`| string     | true     | Идентификатор документа |
+| `file_id`    | string     | true     | Идентификатор файла (используется как имя файла на диске и как часть URL) |
+| `mime_type`  | string     | false    | По умолчанию `pdf` |
+
+#### Пример запроса
+```json
+{
+  "file": "<BASE64_PDF>",
+  "document_id": "2c115314-fb5e-11f0-abf9-00505697f0b9ProformaComercial",
+  "file_id": "f3a7dcac-68c8-413a-ac26-ecad8c86e4d7",
+  "mime_type": "pdf"
+}
+```
+
+#### Пример (curl)
+```bash
+curl -X POST "https://originality-checker.onrender.com/api/upload-json" \
+  -H "Authorization: Bearer <STATIC_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"file":"<BASE64_PDF>","document_id":"doc-1","file_id":"file-1"}'
+```
+
+#### Ответ (пример)
+```json
+{
+  "message": "file saved (pending QR)",
+  "file_id": "f3a7dcac-68c8-413a-ac26-ecad8c86e4d7",
+  "link": "https://originality-checker.onrender.com/publications/f3a7dcac-68c8-413a-ac26-ecad8c86e4d7"
+}
+```
 
 ---
-1. `post /api/upload`
+2. `post /api/upload`
    ##### Обязательный заголовок:
    `Authorization: Bearer <STATIC_TOKEN>`
    ##### Тело запроса:
@@ -73,7 +119,7 @@ https://originality-checker.onrender.com
    - Позже при новом издании (тот же document_id, другой file_id) веб-сервис помечает старый как deleted и сохраняет новый.
 ---
 
-2. `get /publications/:file_id`
+3. `get /publications/:file_id`
    ##### Обязательный заголовок:
    Отсутствует (доступ открыт по прямой ссылке)
    ##### Параметры запроса (передаются в url):
@@ -95,7 +141,7 @@ https://originality-checker.onrender.com
    "*Printable form not found*"
 ---
 
-3. `get /api/status/:file_id`
+4. `get /api/status/:file_id`
    ##### Назначение:
    Получение статуса и метаданных публикации по file_id.
    Используется для отладки и проверки корректности записей в БД.
@@ -114,7 +160,7 @@ https://originality-checker.onrender.com
    { "error": "not found" }.
 ---
 
-4. `get /api/logs`
+5. `get /api/logs`
    ##### Назначение:
    Возвращает список последних действий из таблицы logs.
    Используется для отладки или административного просмотра активности.
