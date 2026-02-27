@@ -1,42 +1,14 @@
-# Originallay checker v1.0.0 
+# Originality checker v1.0.0 
 ## Описание:
-##### Тестовый деплой сервиса:
+### Тестовый деплой сервиса:
 https://originality-checker.onrender.com 
 
 В папке publications сейчас для тестов находится один единственный файл: `test-123`
 
-##### Временный authorization token:
+### Временный authorization token:
 `e704be9a691601ee99a6a483f07f3655c0cbed54e9588ce17abd5ec11fa0c5bf`
 
-### Архитектура:
-- Установка соединения 1С с веб-ресурсом происходит по статическому `Bearer` токену,
-сгенерированному через `crypto`
-- Веб-ресурс написан на фреймворке - `Express.js` (`node.js`) и реализуется по `REST API` архитектуре
-- Простое логирование через библиотеку `Morgan` с фильтрацией заголовка `authorization`, чтобы
-токен не попадал в логи. В логах отображается кто когда какой запрос сделал, посредством
-использования встроенного формата `morgan('combined')`. Вывод логов в консоль при локальной разработке.
-- Прием файлов поддерживает **два формата**:
-  - `multipart/form-data` через `multer` (legacy)
-  - `application/json` (файл в base64) для совместимости с 1С
-- Есть БД `sqlite3`, состоящая из двух таблиц: `logs` и `publications`, хранящиеся в файле - `database.sqlite`.
-   
-
-   `publications`: Хранит метаданные файлов, имеет следующие поля:
-    - documnet_id (type: text)
-    - file_id (type: text; PRIMARY_KEY)
-    - file_type (type: "actual" OR "deleted")
-    - date_of_creation (type: date)
-    - status (type: "pending" OR "fulfilled")
-    - mime_type (type: "pdf" OR "jpg")
-  
-   `logs`: Фиксирует действия с файлами, имеет следующие поля:
-    - id действия PRIMARY_KEY
-    - тип действия (view, upload, delete)
-    - IP-адрес
-    - User-Agent
-    - file_id
-    - время события
-
+---
 
 ## API документация:
 ### Ограничения
@@ -46,12 +18,12 @@ https://originality-checker.onrender.com
 - Максимальный размер PDF: **50MB** (проверяется по декодированным байтам)
 - Для `/api/upload-json` размер JSON-тела должен быть меньше лимита парсера (сейчас настроен запас, см. `src/index.js`)
 
-### Доступные запросы:
 ---
 
-1) `POST /api/upload-json` (рекомендуется для 1С)
+### Доступные запросы:
 
-#### Заголовки
+1. `POST /api/upload-json` (рекомендуется для 1С)
+#### Заголовки:
 - `Authorization: Bearer <STATIC_TOKEN>`
 - `Content-Type: application/json`
 
@@ -63,38 +35,46 @@ https://originality-checker.onrender.com
 | `file_id`    | string     | true     | Идентификатор файла (используется как имя файла на диске и как часть URL) |
 | `mime_type`  | string     | false    | По умолчанию `pdf` |
 
+#### Запрос имеет 3 сценария:
+- **Первая публикация файла на веб-ресурсе с полученными document_id и
+  file_id.**\
+  Веб-ресурс помечает полученный файл статусом pending (QR-кода ещё нет).
+- **Перезапись файла со статусом pending на файл с QR-кодом.**\
+  Веб-ресурс помечает полученный файл статусом fulfilled (файл содержит QR-код).
+- **Запись нового актуального файла вместо файла с таким же documnet_id
+  (file_id при этом разные)**\
+  Веб-ресурс помечает в БД старый файл как "deleted", а новый, как "actual" и "pending".
+  При этом старый файл удаляется, но запись о нём остаётся в БД
+
+#### Пример успешного цикла:
+- 1С отправляет PDF → получает ссылку → генерирует QR по ссылке.
+- 1С отправляет файл (тот же file_id) с QR → веб-сервис заменяет его и ставит fulfilled.
+- Позже при новом издании (тот же document_id, другой file_id) веб-сервис помечает старый как deleted и сохраняет новый.
+
 #### Пример запроса
 ```json
 {
   "file": "<BASE64_PDF>",
-  "document_id": "2c115314-fb5e-11f0-abf9-00505697f0b9ProformaComercial",
-  "file_id": "f3a7dcac-68c8-413a-ac26-ecad8c86e4d7",
+  "document_id": "doc01",
+  "file_id": "id001",
   "mime_type": "pdf"
 }
-```
-
-#### Пример (curl)
-```bash
-curl -X POST "https://originality-checker.onrender.com/api/upload-json" \
-  -H "Authorization: Bearer <STATIC_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"file":"<BASE64_PDF>","document_id":"doc-1","file_id":"file-1"}'
 ```
 
 #### Ответ (пример)
 ```json
 {
   "message": "file saved (pending QR)",
-  "file_id": "f3a7dcac-68c8-413a-ac26-ecad8c86e4d7",
-  "link": "https://originality-checker.onrender.com/publications/f3a7dcac-68c8-413a-ac26-ecad8c86e4d7"
+  "file_id": "id001",
+  "link": "https://originality-checker.onrender.com/publications/id001"
 }
 ```
 
 ---
 2. `post /api/upload`
-   ##### Обязательный заголовок:
+   #### Заголовки:
    `Authorization: Bearer <STATIC_TOKEN>`
-   ##### Тело запроса:
+   #### Тело запроса:
 
    | Поле           |  Тип данных  |  Required  |
    |:---------------|:------------:|:----------:|
@@ -102,33 +82,20 @@ curl -X POST "https://originality-checker.onrender.com/api/upload-json" \
    | `document_id`  |    string    |    true    |
    | `file_id`      |    string    |    true    |
 
-   ##### Запрос имеет 3 сценария:
-   - **Первая публикация файла на веб-ресурсе с полученными document_id и
-   file_id.**\
-   Веб-ресурс помечает полученный файл статусом pending (QR-кода ещё нет).
-   - **Перезапись файла со статусом pending на файл с QR-кодом.**\
-   Веб-ресурс помечает полученный файл статусом fulfilled (файл содержит QR-код).
-   - **Запись нового актуального файла вместо файла с таким же documnet_id
-   (file_id при этом разные)**\
-   Веб-ресурс помечает в БД старый файл как "deleted", а новый, как "actual" и "pending".
-   При этом старый файл удаляется, но запись о нём остаётся в БД
+    #### Сценарии аналогичны `post /api/upload-json`
 
-   ##### Пример успешного цикла:
-   - 1С отправляет PDF → получает ссылку → генерирует QR по ссылке.
-   - 1С отправляет файл (тот же file_id) с QR → веб-сервис заменяет его и ставит fulfilled.
-   - Позже при новом издании (тот же document_id, другой file_id) веб-сервис помечает старый как deleted и сохраняет новый.
 ---
 
 3. `get /publications/:file_id`
-   ##### Обязательный заголовок:
-   Отсутствует (доступ открыт по прямой ссылке)
-   ##### Параметры запроса (передаются в url):
+   #### Заголовки:
+   Отсутствуют (доступ открыт по прямой ссылке)
+   #### Параметры запроса (передаются в url):
 
    | Поле           |  Тип данных  |  Required  |
    |:---------------|:------------:|:----------:|
    | `file_id`      |    string    |    true    |
 
-   ##### Запрос имеет 3 сценария:
+   #### Запрос имеет 3 сценария:
    - **HTTP 200 OK**\
    Если в таблице publications существует запись с данным file_id и file_type
    == 'actual', то возвращается сам PDF-файл с заголовком Content-Type:
@@ -142,18 +109,18 @@ curl -X POST "https://originality-checker.onrender.com/api/upload-json" \
 ---
 
 4. `get /api/status/:file_id`
-   ##### Назначение:
+   #### Назначение:
    Получение статуса и метаданных публикации по file_id.
    Используется для отладки и проверки корректности записей в БД.
-   ##### Обязательный заголовок
+   #### Заголовки:
    `Authorization: Bearer <STATIC_TOKEN>`
-   ##### Параметры запроса:
+   #### Параметры запроса:
 
    | Поле           |  Тип данных  |  Required  |
    |:---------------|:------------:|:----------:|
    | `file_id`      |    string    |    true    |
 
-   ##### Запрос имеет 2 сценария
+   #### Запрос имеет 2 сценария
    - Если запись с указанным file_id существует, то возвращаются все поля
    из таблицы publications.
    - Если записи нет, то возвращается **HTTP 404 Not Found**,
@@ -161,15 +128,53 @@ curl -X POST "https://originality-checker.onrender.com/api/upload-json" \
 ---
 
 5. `get /api/logs`
-   ##### Назначение:
+   #### Назначение:
    Возвращает список последних действий из таблицы logs.
    Используется для отладки или административного просмотра активности.
-   ##### Обязательный заголовок
+   #### Заголовки:
    `Authorization: Bearer <STATIC_TOKEN>`
-   ##### Параметры запроса:
+   #### Параметры запроса:
    Отсутствуют
-   ##### Запрос имеет 1 сценарий
+   #### Запрос имеет 1 сценарий
     - Возвращает массив до 500 последних записей, отсортированных по дате
     (ts DESC).
 ---
 
+## Архитектура:
+- Установка соединения 1С с веб-ресурсом происходит по статическому `Bearer` токену,
+  сгенерированному через `crypto`
+- Веб-ресурс написан на фреймворке - `Express.js` (`node.js`) и реализуется по `REST API` архитектуре
+- Простое логирование через библиотеку `Morgan` с фильтрацией заголовка `authorization`, чтобы
+  токен не попадал в логи. В логах отображается кто когда какой запрос сделал, посредством
+  использования встроенного формата `morgan('combined')`. Вывод логов в консоль при локальной разработке.
+- Прием файлов поддерживает **два формата**:
+    - `multipart/form-data` через `multer` (legacy)
+    - `application/json` (файл в base64) для совместимости с 1С
+
+
+- БД `sqlite3`, хранящиеся в файле - `database.sqlite`:
+```mermaid
+erDiagram
+    %% Таблица публикаций (метаданные файлов)
+    publications {
+    text file_id PK "Первичный ключ"
+    text documnet_id "ID документа"
+    text file_type "actual, deleted"
+    date date_of_creation "Дата создания"
+    text status "pending, fulfilled"
+    text mime_type "pdf, jpg"
+    }
+
+    %% Таблица логов (действия с файлами)
+    logs {
+    integer id PK "ID действия"
+    text action_type "view, upload, delete"
+    text ip_address "IP-адрес"
+    text user_agent "User-Agent"
+    text file_id FK "Внешний ключ -> publications.file_id"
+    datetime event_time "Время события"
+    }
+
+    %% Связь: Одна публикация может иметь много записей в логах
+    publications ||--o{ logs : "имеет логи"
+```
