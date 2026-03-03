@@ -248,6 +248,29 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
     }
 });
 
+// Endpoint: soft delete (actual -> deleted)
+app.patch('/api/publications/:file_id/delete', authMiddleware, async (req, res) => {
+    try {
+        const { file_id } = req.params;
+
+        const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
+
+        if (!rec) return res.status(404).json({ error: 'file not found' });
+
+        if (rec.file_type === 'deleted')  return res.status(400).json({ error: 'file already deleted' });
+
+        await run(`UPDATE publications SET file_type = 'deleted' WHERE file_id = ?`,[file_id]);
+
+        await logAction('delete', req, file_id);
+
+        return res.json({ message: 'file marked as deleted', file_id});
+
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 // Endpoint: get file by file_id (это публичная ссылка, которую даём в 1С)
 // Поведение при запросе:
 // - Если в publications есть запись file_id и file_type == 'actual' -> отдаем файл
@@ -255,14 +278,16 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
 // - Если записи нет -> 404 "Printable form not found"
 app.get('/publications/:file_id', async (req, res) => {
     try {
-        const { file_id } = req.params;
+        const { file_id, document_id } = req.params;
         const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
         if (!rec) {
             return res.status(404).send('Printable form not found');
         }
         if (rec.file_type !== 'actual') {
             // История — файл есть, но отмечен как deleted
-            return res.status(410).send('The printed form is not relevant');
+            const actualFile = await get(`SELECT * FROM publications WHERE document_id = ? AND file_type = 'actual'`, [document_id])
+            if (actualFile) return res.status(410).send('The printed form is not relevant');
+            else return res.status(410).send('The printed form is not relevant, request a new commercial invoice');
         }
         const filePath = path.join(PUBLIC_DIR, `${file_id}.pdf`);
         if (!fs.existsSync(filePath)) {

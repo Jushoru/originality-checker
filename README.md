@@ -158,7 +158,7 @@ erDiagram
     %% Таблица публикаций (метаданные файлов)
     publications {
     text file_id PK "Первичный ключ"
-    text documnet_id "ID документа"
+    text document_id "ID документа"
     text file_type "actual, deleted"
     date date_of_creation "Дата создания"
     text status "pending, fulfilled"
