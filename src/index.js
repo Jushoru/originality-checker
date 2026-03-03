@@ -44,6 +44,8 @@ async function logAction(action_type, req, file_id = null) {
         [action_type, ip, ua, file_id, ts]);
 }
 
+//todo: перед запуском в продакшн слить в один запрос upoad-json и upload
+
 // Новый endpoint: отправка файла из 1С в JSON (base64)
 // Content-Type: application/json
 // Body:
