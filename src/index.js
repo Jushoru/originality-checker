@@ -285,7 +285,7 @@ app.get('/publications/:file_id', async (req, res) => {
         }
         if (rec.file_type !== 'actual') {
             // История — файл есть, но отмечен как deleted
-            const actualFile = await get(`SELECT * FROM publications WHERE document_id = ? AND file_type = 'actual'`, [document_id])
+            const actualFile = await get(`SELECT * FROM publications WHERE document_id = ? AND file_type = 'actual'`, [rec.document_id])
             if (actualFile) return res.status(410).send('The printed form is not relevant');
             else return res.status(410).send('The printed form is not relevant, request a new commercial invoice');
         }
