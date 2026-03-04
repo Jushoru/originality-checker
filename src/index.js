@@ -4,6 +4,7 @@ const fs = require('fs');
 const morgan = require('morgan');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto')
 
 const authMiddleware = require('./middleware/auth');
 const { run, get, all } = require('./db');
@@ -80,31 +81,34 @@ async function logAction(action_type, req, file_id = null) {
 // }
 app.post('/api/upload', authMiddleware, async (req, res) => {
     const tmpPaths = []; // для отслеживания tmp-файлов
+    let storedPath = null;
+
     try {
         const { file_id, document_id, mime_type, file } = req.body || {};
-
         const safeFileId = sanitizeId(file_id);
         if (!safeFileId) return res.status(400).json({ error: 'invalid file_id' });
 
         const safeDocId = sanitizeId(document_id);
         if (!safeDocId) return res.status(400).json({ error: 'invalid document_id' });
 
-        const storedPath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
-        const tmpPath = storedPath + '.tmp';
-        tmpPaths.push(tmpPath);
-
         if (!file) return res.status(400).json({ error: 'missing file' });
-        const pdfBuffer = Buffer.from(file.split('base64,').pop(), 'base64');
 
+        const tmpName = `${safeFileId}.${crypto.randomBytes(6).toString('hex')}.pdf.tmp`;
+        const tmpPath = path.join(PUBLIC_DIR, tmpName);
+        tmpPaths.push(tmpPath);
+        storedPath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
+
+        const pdfBuffer = Buffer.from(file.split('base64,').pop(), 'base64');
         if (pdfBuffer.length > MAX_PDF_BYTES) {
             return res.status(413).json({ error: 'PDF file is too large (max 50MB)' });
         }
-
         if (!isValidPdf(pdfBuffer)) {
             return res.status(400).json({ error: 'file is not a valid PDF' });
         }
 
-        await run('BEGIN');
+        await fs.promises.writeFile(tmpPath, pdfBuffer);
+
+        await run('BEGIN IMMEDIATE');
 
         // 1) Если в БД уже есть запись с этим file_id
         const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = ?`, [safeFileId]);
@@ -140,25 +144,30 @@ app.post('/api/upload', authMiddleware, async (req, res) => {
             message = 'file saved (pending QR)';
         }
 
-        await fs.promises.writeFile(tmpPath, pdfBuffer);
+        await run('COMMIT');
 
         await logAction('upload', req, safeFileId);
 
         await fs.promises.rename(tmpPath, storedPath);
 
-        await run('COMMIT');
-
         const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(safeFileId)}`;
         return res.json({ message, file_id: safeFileId, link });
 
     } catch (err) {
-        await run('ROLLBACK').catch(() => {});
-        for (const tmpPath of tmpPaths) await deleteFileFromPublications(tmpPath);
+        // откат БД если нужно
+        try { await run('ROLLBACK'); } catch (_) {}
+        // удаляем tmp и (если есть) storedPath
+        for (const p of tmpPaths) await deleteFileFromPublications(p);
+        if (storedPath) {
+            // если файл успел попасть в storedPath, удаляем его
+            await deleteFileFromPublications(storedPath);
+        }
         console.error(err);
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({ error: err.message || 'internal error' });
     }
 });
 
+// Endpoint: soft delete (actual -> deleted)
 // Endpoint: soft delete (actual -> deleted)
 app.patch('/api/publications/:file_id/delete', authMiddleware, async (req, res) => {
     const { file_id } = req.params;
@@ -168,27 +177,35 @@ app.patch('/api/publications/:file_id/delete', authMiddleware, async (req, res) 
     const storedPath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
 
     try {
-        await run('BEGIN TRANSACTION')
+        await run('BEGIN IMMEDIATE');
 
         const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [safeFileId]);
-        if (!rec) return res.status(404).json({ error: 'file not found' });
-        if (rec.file_type === 'deleted')  return res.status(400).json({ error: 'file already deleted' });
+        if (!rec) {
+            // обязательно откат перед возвратом
+            await run('ROLLBACK').catch(() => {});
+            return res.status(404).json({ error: 'file not found' });
+        }
+        if (rec.file_type === 'deleted')  {
+            await run('ROLLBACK').catch(() => {});
+            return res.status(400).json({ error: 'file already deleted' });
+        }
 
-        await run(`UPDATE publications SET file_type = 'deleted' WHERE file_id = ?`,[safeFileId]);
+        await run(`UPDATE publications SET file_type = 'deleted' WHERE file_id = ?`, [safeFileId]);
         await deleteFileFromPublications(storedPath);
+
+        await run('COMMIT');
+
+        // logAction вне транзакции — чтобы не стартовать вложенную транзакцию
         await logAction('delete', req, safeFileId);
 
-        await run('COMMIT')
-
-        return res.json({ message: 'file marked as deleted', file_id: safeFileId});
+        return res.json({ message: 'file marked as deleted', file_id: safeFileId });
 
     } catch (err) {
         await run('ROLLBACK').catch(() => {});
         console.error(err);
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({ error: err.message || 'internal error' });
     }
 });
-
 // Endpoint: get file by file_id (это публичная ссылка, которую даём в 1С)
 // Поведение при запросе:
 // - Если в publications есть запись file_id и file_type == 'actual' -> отдаем файл
