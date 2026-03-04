@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const morgan = require('morgan');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const authMiddleware = require('./middleware/auth');
 const { run, get, all } = require('./db');
@@ -11,8 +12,17 @@ const PUBLIC_DIR = path.join(__dirname, 'publications');
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
 const app = express();
+
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(express.json({ limit: '70mb' }));
+const MAX_PDF_BYTES = 50 * 1024 * 1024;
+
+const publicLimiter = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false });
+const apiLimiter = rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+app.use('/api', apiLimiter);
 
 // Morgan: фильтруем header Authorization (в логах не должно быть токена)
 morgan.token('filtered-authorization', (req) => {
@@ -77,7 +87,7 @@ app.post('/api/upload', authMiddleware, async (req, res) => {
         if (!safeFileId) return res.status(400).json({ error: 'invalid file_id' });
 
         const safeDocId = sanitizeId(document_id);
-        if (!safeDocId) return res.status(400).json({ error: 'invalid file_id' });
+        if (!safeDocId) return res.status(400).json({ error: 'invalid document_id' });
 
         const storedPath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
         const tmpPath = storedPath + '.tmp';
@@ -85,6 +95,10 @@ app.post('/api/upload', authMiddleware, async (req, res) => {
 
         if (!file) return res.status(400).json({ error: 'missing file' });
         const pdfBuffer = Buffer.from(file.split('base64,').pop(), 'base64');
+
+        if (pdfBuffer.length > MAX_PDF_BYTES) {
+            return res.status(413).json({ error: 'PDF file is too large (max 50MB)' });
+        }
 
         if (!isValidPdf(pdfBuffer)) {
             return res.status(400).json({ error: 'file is not a valid PDF' });
@@ -130,9 +144,9 @@ app.post('/api/upload', authMiddleware, async (req, res) => {
 
         await logAction('upload', req, safeFileId);
 
-        await run('COMMIT');
-
         await fs.promises.rename(tmpPath, storedPath);
+
+        await run('COMMIT');
 
         const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(safeFileId)}`;
         return res.json({ message, file_id: safeFileId, link });
@@ -180,7 +194,7 @@ app.patch('/api/publications/:file_id/delete', authMiddleware, async (req, res) 
 // - Если в publications есть запись file_id и file_type == 'actual' -> отдаем файл
 // - Если запись была (file_type == 'deleted') -> возвращаем текст "The printed form is not relevant" (HTTP 410)
 // - Если записи нет -> 404 "Printable form not found"
-app.get('/publications/:file_id', async (req, res) => {
+app.get('/publications/:file_id', publicLimiter, async (req, res) => {
     try {
         const { file_id } = req.params;
         const safeFileId = sanitizeId(file_id)
@@ -197,10 +211,6 @@ app.get('/publications/:file_id', async (req, res) => {
         }
         const filePath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
 
-        console.log('PUBLIC_DIR=', PUBLIC_DIR);
-        console.log('safeFileId=', safeFileId);
-        console.log('filePath=', filePath);
-        console.log('existsSync=', fs.existsSync(filePath));
 
         try {
             await fs.promises.access(filePath);
