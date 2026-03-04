@@ -1,20 +1,18 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const multer = require('multer');
 const morgan = require('morgan');
 const helmet = require('helmet');
-const bodyParser = require('body-parser');
 
 const authMiddleware = require('./middleware/auth');
-const { db, run, get, all } = require('./db');
+const { run, get, all } = require('./db');
 
 const PUBLIC_DIR = path.join(__dirname, 'publications');
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
 const app = express();
 app.use(helmet());
-app.use(bodyParser.json({ limit: '150mb' }));
+app.use(express.json({ limit: '70mb' }));
 
 // Morgan: фильтруем header Authorization (в логах не должно быть токена)
 morgan.token('filtered-authorization', (req) => {
@@ -24,16 +22,33 @@ morgan.token('filtered-authorization', (req) => {
 });
 app.use(morgan(':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" :filtered-authorization'));
 
-// Multer setup: сохраняем файл временно и потом перемещаем под именем file_id.pdf
-const storage = multer.memoryStorage();
-const upload = multer({
-    storage,
-    limits: { fileSize: 50 * 1024 * 1024 },
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype === 'application/pdf') return cb(null, true);
-        cb(new Error('Only PDF files are allowed'));
+async function deleteFileFromPublications(filePath) {
+    try {
+        await fs.promises.unlink(filePath);
+    } catch (e) {
+        if (e && e.code === 'ENOENT') return;
+        console.error('Failed to delete file:', filePath, e);
     }
-});
+}
+
+function isValidPdf(buffer) {
+    if (!buffer || buffer.length < 8) return false;
+
+    const header = buffer.subarray(0, 4).toString('utf8');
+    if (header !== '%PDF') return false;
+
+    const tail = buffer.subarray(-1024).toString('utf8');
+    if (!tail.includes('%%EOF')) return false;
+
+    return true;
+}
+
+function sanitizeId(id) {
+    if (!id || typeof id !== 'string') return null;
+    const sanitized = id.trim();
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(sanitized)) return null;
+    return sanitized;
+}
 
 // Запись лога в БД
 async function logAction(action_type, req, file_id = null) {
@@ -44,8 +59,6 @@ async function logAction(action_type, req, file_id = null) {
         [action_type, ip, ua, file_id, ts]);
 }
 
-//todo: перед запуском в продакшн слить в один запрос upoad-json и upload
-
 // Новый endpoint: отправка файла из 1С в JSON (base64)
 // Content-Type: application/json
 // Body:
@@ -55,196 +68,78 @@ async function logAction(action_type, req, file_id = null) {
 //   "document_id": "...",
 //   "mime_type": "pdf" // optional
 // }
-app.post('/api/upload-json', authMiddleware, async (req, res) => {
+app.post('/api/upload', authMiddleware, async (req, res) => {
+    const tmpPaths = []; // для отслеживания tmp-файлов
     try {
-        // помогает быстрее диагностировать "прилетело не то"
-        if (!req.is('application/json')) {
-            return res.status(415).json({ error: 'Content-Type must be application/json' });
-        }
-
         const { file_id, document_id, mime_type, file } = req.body || {};
 
-        if (!file_id || !document_id) {
-            return res.status(400).json({ error: 'file_id and document_id are required' });
-        }
-        if (!file) {
-            return res.status(400).json({ error: 'file is required (base64 in JSON)' });
-        }
+        const safeFileId = sanitizeId(file_id);
+        if (!safeFileId) return res.status(400).json({ error: 'invalid file_id' });
 
-        // Поддержим вариант data URL: "data:application/pdf;base64,...."
-        const base64Payload = String(file).includes('base64,')
-            ? String(file).split('base64,').pop()
-            : String(file);
+        const safeDocId = sanitizeId(document_id);
+        if (!safeDocId) return res.status(400).json({ error: 'invalid file_id' });
 
-        let pdfBuffer;
-        try {
-            pdfBuffer = Buffer.from(base64Payload, 'base64');
-        } catch (e) {
-            return res.status(400).json({ error: 'file is not valid base64' });
+        const storedPath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
+        const tmpPath = storedPath + '.tmp';
+        tmpPaths.push(tmpPath);
+
+        if (!file) return res.status(400).json({ error: 'missing file' });
+        const pdfBuffer = Buffer.from(file.split('base64,').pop(), 'base64');
+
+        if (!isValidPdf(pdfBuffer)) {
+            return res.status(400).json({ error: 'file is not a valid PDF' });
         }
 
-        // Минимальная проверка, что это похоже на PDF
-        if (pdfBuffer.length < 5 || pdfBuffer.subarray(0, 4).toString('utf8') !== '%PDF') {
-            return res.status(400).json({ error: 'file is not a PDF' });
-        }
-
-        // Доп. защита по размеру (т.к. тут уже не multer limits)
-        const MAX_PDF_BYTES = 50 * 1024 * 1024;
-        if (pdfBuffer.length > MAX_PDF_BYTES) {
-            return res.status(413).json({ error: 'PDF file is too large (max 50MB)' });
-        }
-
-        const storedFilename = `${file_id}.pdf`;
-        const storedPath = path.join(PUBLIC_DIR, storedFilename);
-        const now = (new Date()).toISOString();
+        await run('BEGIN');
 
         // 1) Если в БД уже есть запись с этим file_id
-        const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
-
+        const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = ?`, [safeFileId]);
+        let message = '';
         if (existingByFileId) {
-            const isActual = await get(`SELECT * FROM publications WHERE file_type = 'actual' AND file_id = ?`, [file_id]);
-
+            const isActual = await get(`SELECT * FROM publications WHERE file_type = 'actual' AND file_id = ?`, [safeFileId]);
             if (isActual) {
-                await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
-                    [now, 'fulfilled', mime_type || 'pdf', 'actual', file_id]);
+                await run(`UPDATE publications SET date_of_creation=?, status=?, mime_type=?, file_type=? WHERE file_id=?`,
+                    [new Date().toISOString(), 'fulfilled', mime_type || 'pdf', 'actual', safeFileId]);
             } else {
-                await run(`UPDATE publications SET file_type = 'deleted' WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
-
-                await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
-                    [now, 'pending', mime_type || 'pdf', 'actual', file_id]);
+                await run(`UPDATE publications SET file_type='deleted' WHERE document_id=? AND file_type='actual'`, [safeDocId]);
+                await run(`UPDATE publications SET date_of_creation=?, status=?, mime_type=?, file_type=? WHERE file_id=?`,
+                    [new Date().toISOString(), 'pending', mime_type || 'pdf', 'actual', safeFileId]);
             }
-
-            await fs.promises.writeFile(storedPath, pdfBuffer);
-
-            await logAction('upload', req, file_id);
-            const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
-            return res.json({ message: 'file overwritten', file_id, link });
+            message = 'file overwritten';
         }
 
         // 2) Иначе — если есть запись с таким document_id и file_type == 'actual'
-        const existingByDoc = await get(`SELECT * FROM publications WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
-
-        if (existingByDoc) {
-            await run(`UPDATE publications SET file_type = 'deleted' WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
-
+        const existingByDoc = await get(`SELECT * FROM publications WHERE document_id=? AND file_type='actual'`, [safeDocId]);
+        if (!message && existingByDoc) {
+            await run(`UPDATE publications SET file_type='deleted' WHERE document_id=? AND file_type='actual'`, [safeDocId]);
             const oldPath = path.join(PUBLIC_DIR, `${existingByDoc.file_id}.pdf`);
-            if (fs.existsSync(oldPath)) {
-                try { await fs.promises.unlink(oldPath); } catch (e) { /* ignore */ }
-            }
-
-            await fs.promises.writeFile(storedPath, pdfBuffer);
+            await deleteFileFromPublications(oldPath);
             await run(`INSERT OR REPLACE INTO publications (file_id, document_id, file_type, date_of_creation, status, mime_type) VALUES (?, ?, ?, ?, ?, ?)`,
-                [file_id, document_id, 'actual', now, 'pending', mime_type || 'pdf']);
-
-            await logAction('upload', req, file_id);
-            const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
-            return res.json({ message: 'replaced old file (by document_id) with new file_id (pending QR)', file_id, link });
+                [safeFileId, safeDocId, 'actual', new Date().toISOString(), 'pending', mime_type || 'pdf']);
+            message = 'replaced old file (by document_id) with new file_id (pending QR)';
         }
 
         // 3) Первая публикация
-        await fs.promises.writeFile(storedPath, pdfBuffer);
-        await run(`INSERT INTO publications (file_id, document_id, file_type, date_of_creation, status, mime_type) VALUES (?, ?, ?, ?, ?, ?)`,
-            [file_id, document_id, 'actual', now, 'pending', mime_type || 'pdf']);
+        if (!message) {
+            await run(`INSERT INTO publications (file_id, document_id, file_type, date_of_creation, status, mime_type) VALUES (?, ?, ?, ?, ?, ?)`,
+                [safeFileId, safeDocId, 'actual', new Date().toISOString(), 'pending', mime_type || 'pdf']);
+            message = 'file saved (pending QR)';
+        }
 
-        await logAction('upload', req, file_id);
-        const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
+        await fs.promises.writeFile(tmpPath, pdfBuffer);
 
-        return res.json({ message: 'file saved (pending QR)', file_id, link });
+        await logAction('upload', req, safeFileId);
+
+        await run('COMMIT');
+
+        await fs.promises.rename(tmpPath, storedPath);
+
+        const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(safeFileId)}`;
+        return res.json({ message, file_id: safeFileId, link });
 
     } catch (err) {
-        console.error(err);
-        return res.status(500).json({ error: err.message });
-    }
-});
-
-// Endpoint: отправка файла из 1С на originally checker
-// Ожидаемые поля в form-data:
-//  Required:
-//   - file (pdf)
-//   - file_id (text)
-//   - document_id (text)
-//  Optionally:
-//   - mime_type
-app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) => {
-    try {
-        const file = req.file;
-        const { file_id, document_id, mime_type } = req.body;
-
-        if (!file_id || !document_id) {
-            return res.status(400).json({ error: 'file_id and document_id are required' });
-        }
-        if (!file) {
-            return res.status(400).json({ error: 'file is required (multipart/form-data)' });
-        }
-
-        const storedFilename = `${file_id}.pdf`;
-        const storedPath = path.join(PUBLIC_DIR, storedFilename);
-        const now = (new Date()).toISOString();
-
-        // 1) Если в БД уже есть запись с этим file_id
-        const existingByFileId = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
-
-        if (existingByFileId) {
-            // перезаписываем файл на диск
-
-            const isActual = await get(`SELECT * FROM publications WHERE file_type = 'actual' AND file_id = ?`, [file_id]);
-
-            // Если файл уже есть в базе,
-            if (isActual) {
-                // файл актуальный, значит он pending, значит обновляем статус на fullfiled
-                await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
-                    [now, 'fulfilled', mime_type || 'pdf', 'actual', file_id]);
-            } else {
-                // файл не актуальный, значит он deleted, значит помечаем actual файл как deleted, новый как actual и pending
-                await run(`UPDATE publications SET file_type = 'deleted' WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
-
-                await run(`UPDATE publications SET date_of_creation = ?, status = ?, mime_type = ?, file_type = ? WHERE file_id = ?`,
-                    [now, 'pending', mime_type || 'pdf', 'actual', file_id]);
-            }
-
-            await fs.promises.writeFile(storedPath, file.buffer);
-
-
-            await logAction('upload', req, file_id);
-            // возвращаем ссылку, которая не меняется (file_id в URL)
-            const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
-            return res.json({ message: 'file overwritten', file_id, link });
-        }
-
-        // 2) Иначе — если есть запись с таким document_id и file_type == 'actual' (т.е. старая версия с другим file_id)
-        const existingByDoc = await get(`SELECT * FROM publications WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
-
-        if (existingByDoc) {
-            // помечаем старые записи как deleted
-            await run(`UPDATE publications SET file_type = 'deleted' WHERE document_id = ? AND file_type = 'actual'`, [document_id]);
-
-            // удаляем физический файл старого file_id если существует
-            const oldPath = path.join(PUBLIC_DIR, `${existingByDoc.file_id}.pdf`);
-            if (fs.existsSync(oldPath)) {
-                try { await fs.promises.unlink(oldPath); } catch (e) { /* ignore */ }
-            }
-
-            await fs.promises.writeFile(storedPath, file.buffer);
-            await run(`INSERT OR REPLACE INTO publications (file_id, document_id, file_type, date_of_creation, status, mime_type) VALUES (?, ?, ?, ?, ?, ?)`,
-                [file_id, document_id, 'actual', now, 'pending', mime_type || 'pdf']);
-
-            await logAction('upload', req, file_id);
-            const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
-            return res.json({ message: 'replaced old file (by document_id) with new file_id (pending QR)', file_id, link });
-        }
-
-        // 3) Ничего не найдено — это первая публикация для данного !document_id и file_id.
-        // Сохраняем файл и помечаем status = pending (т.к. ожидаем возвращённый PDF с QR)
-        await fs.promises.writeFile(storedPath, file.buffer);
-        await run(`INSERT INTO publications (file_id, document_id, file_type, date_of_creation, status, mime_type) VALUES (?, ?, ?, ?, ?, ?)`,
-            [file_id, document_id, 'actual', now, 'pending', mime_type || 'pdf']);
-
-        await logAction('upload', req, file_id);
-        const link = `${req.protocol}://${req.get('host')}/publications/${encodeURIComponent(file_id)}`;
-
-        return res.json({ message: 'file saved (pending QR)', file_id, link });
-
-    } catch (err) {
+        await run('ROLLBACK').catch(() => {});
+        for (const tmpPath of tmpPaths) await deleteFileFromPublications(tmpPath);
         console.error(err);
         return res.status(500).json({ error: err.message });
     }
@@ -252,22 +147,29 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
 
 // Endpoint: soft delete (actual -> deleted)
 app.patch('/api/publications/:file_id/delete', authMiddleware, async (req, res) => {
+    const { file_id } = req.params;
+    const safeFileId = sanitizeId(file_id);
+    if (!safeFileId) return res.status(400).json({ error: 'invalid file_id' });
+
+    const storedPath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
+
     try {
-        const { file_id } = req.params;
+        await run('BEGIN TRANSACTION')
 
-        const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
-
+        const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [safeFileId]);
         if (!rec) return res.status(404).json({ error: 'file not found' });
-
         if (rec.file_type === 'deleted')  return res.status(400).json({ error: 'file already deleted' });
 
-        await run(`UPDATE publications SET file_type = 'deleted' WHERE file_id = ?`,[file_id]);
+        await run(`UPDATE publications SET file_type = 'deleted' WHERE file_id = ?`,[safeFileId]);
+        await deleteFileFromPublications(storedPath);
+        await logAction('delete', req, safeFileId);
 
-        await logAction('delete', req, file_id);
+        await run('COMMIT')
 
-        return res.json({ message: 'file marked as deleted', file_id});
+        return res.json({ message: 'file marked as deleted', file_id: safeFileId});
 
     } catch (err) {
+        await run('ROLLBACK').catch(() => {});
         console.error(err);
         return res.status(500).json({ error: err.message });
     }
@@ -280,26 +182,28 @@ app.patch('/api/publications/:file_id/delete', authMiddleware, async (req, res) 
 // - Если записи нет -> 404 "Printable form not found"
 app.get('/publications/:file_id', async (req, res) => {
     try {
-        const { file_id, document_id } = req.params;
-        const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
-        if (!rec) {
-            return res.status(404).send('Printable form not found');
-        }
+        const { file_id } = req.params;
+        const safeFileId = sanitizeId(file_id)
+        if (!safeFileId) return res.status(400).json({ error: 'invalid file_id' });
+
+        const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [safeFileId]);
+        if (!rec) return res.status(404).send('Printable form not found');
+
         if (rec.file_type !== 'actual') {
             // История — файл есть, но отмечен как deleted
             const actualFile = await get(`SELECT * FROM publications WHERE document_id = ? AND file_type = 'actual'`, [rec.document_id])
             if (actualFile) return res.status(410).send('The printed form is not relevant');
             else return res.status(410).send('The printed form is not relevant, request a new commercial invoice');
         }
-        const filePath = path.join(PUBLIC_DIR, `${file_id}.pdf`);
-        if (!fs.existsSync(filePath)) {
-            // Файл отсутствует физически — пометим deleted и ответим 410
-            await run(`UPDATE publications SET file_type = 'deleted' WHERE file_id = ?`, [file_id]);
+        const filePath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
+
+        try {
+            await fs.promises.access(filePath);
+        } catch {
             return res.status(410).send('The printed form is not relevant');
         }
-        // Логируем просмотр
-        await run(`INSERT INTO logs (action_type, ip, user_agent, file_id, ts) VALUES (?, ?, ?, ?, ?)`,
-            ['view', req.ip || '', req.get('user-agent') || '', file_id, (new Date()).toISOString()]);
+
+        await logAction('view', req, safeFileId);
 
         res.sendFile(filePath);
     } catch (err) {
@@ -313,7 +217,10 @@ app.get('/publications/:file_id', async (req, res) => {
 // Endpoint: получить статус по file_id (полезно для отладки)
 app.get('/api/status/:file_id', authMiddleware, async (req, res) => {
     const { file_id } = req.params;
-    const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [file_id]);
+    const safeFileId = sanitizeId(file_id)
+    if (!safeFileId) return res.status(400).json({ error: 'invalid file_id' });
+
+    const rec = await get(`SELECT * FROM publications WHERE file_id = ?`, [safeFileId]);
     if (!rec) return res.status(404).json({ error: 'not found' });
     res.json(rec);
 });
@@ -323,8 +230,6 @@ app.get('/api/logs', authMiddleware, async (req, res) => {
     const rows = await all(`SELECT * FROM logs ORDER BY ts DESC LIMIT 500`);
     res.json(rows);
 });
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
