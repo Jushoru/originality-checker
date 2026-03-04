@@ -4,7 +4,7 @@
 https://originality-checker.onrender.com 
 
 В папке publications сейчас для тестов находится один единственный файл:
-- file_id: `test-123`;
+- file_id: `test-125`;
 - document_id: `doc-001`.
 
 ### Временный authorization token:

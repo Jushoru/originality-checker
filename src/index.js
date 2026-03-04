@@ -197,6 +197,11 @@ app.get('/publications/:file_id', async (req, res) => {
         }
         const filePath = path.join(PUBLIC_DIR, `${safeFileId}.pdf`);
 
+        console.log('PUBLIC_DIR=', PUBLIC_DIR);
+        console.log('safeFileId=', safeFileId);
+        console.log('filePath=', filePath);
+        console.log('existsSync=', fs.existsSync(filePath));
+
         try {
             await fs.promises.access(filePath);
         } catch {
