@@ -1,5 +1,5 @@
-import { existsSync, copyFileSync } from 'node:fs'
-import { join } from 'node:path'
+const { existsSync, copyFileSync } = require('fs')
+const { join } = require('path')
 
 const root = process.cwd()
 const source = join(root, '.env.example')
