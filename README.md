@@ -1,18 +1,55 @@
-# Originality checker v1.0.0 
+# Originality checker v1.0.0
+
 ## Описание:
 ### Тестовый деплой сервиса:
-https://originality-checker.onrender.com 
+https://originality-checker.onrender.com
 
-В папке publications сейчас для тестов находится один единственный файл:
-- file_id: `test-125`;
-- document_id: `doc-001`.
+В папке `src/publications` для тестов находится один файл:
+- `file_id`: `test-125`
+- `document_id`: `doc-001`
 
 ### Временный authorization token:
 `e704be9a691601ee99a6a483f07f3655c0cbed54e9588ce17abd5ec11fa0c5bf`
 
+> ⚠️ ВАЖНО: ручное удаление файлов из `src/publications` **не рекомендуется**.
+> Корректный способ снять файл с публикации — `PATCH /api/publications/:file_id/delete`.
 ---
 
-> ⚠️ ВАЖНО: ручное удаление файлов из publications ЗАПРЕЩЕНО! Это может повлечь за собой нарушение в работе сервиса
+## Стек
+- **Express.js**
+- **SQLite** (`sqlite3`) — хранение метаданных и логов в `database.sqlite`
+
+---
+
+## Быстрый старт (локально)
+
+### Требования
+- Node.js / npm
+- `.env`
+
+### 1. Установка зависимостей
+```bash
+npm install
+```
+
+### 2. Инициализация окружения (.env)
+```bash
+npm run setup:env
+```
+Создаст `.env` на основе `.env.example`.
+
+**STATIC_TOKEN** — статический токен для авторизации запросов к `/api/*`.
+
+### 3. Запуск сервиса:
+```bash
+npm run start
+```
+
+После запуска сервис будет доступен по адресу:
+- http://localhost:3000
+
+---
+
 
 ## API документация:
 ### Ограничения
@@ -26,68 +63,50 @@ https://originality-checker.onrender.com
 
 ### Доступные запросы:
 
-1. `POST /api/upload-json` (рекомендуется для 1С)
-   #### Заголовки:
+1. `POST /api/upload`
+    Загрузка PDF в формате JSON (base64). Используется для интеграции с 1С.
+    
+    **Заголовки:**
    - `Authorization: Bearer <STATIC_TOKEN>`
    - `Content-Type: application/json`
-   
-   #### Тело запроса (JSON)
-   | Поле          | Тип данных | Required | Описание |
-   |--------------|------------|----------|----------|
-   | `file`       | string     | true     | PDF в base64. Допускается также формат `data:application/pdf;base64,<...>` |
-   | `document_id`| string     | true     | Идентификатор документа |
-   | `file_id`    | string     | true     | Идентификатор файла (используется как имя файла на диске и как часть URL) |
-   | `mime_type`  | string     | false    | По умолчанию `pdf` |
-   
-   #### Запрос имеет 3 сценария:
-   - **Первая публикация файла на веб-ресурсе с полученными document_id и
-     file_id.**\
-     Веб-ресурс помечает полученный файл статусом pending (QR-кода ещё нет).
-   - **Перезапись файла со статусом pending на файл с QR-кодом.**\
-     Веб-ресурс помечает полученный файл статусом fulfilled (файл содержит QR-код).
-   - **Запись нового актуального файла вместо файла с таким же documnet_id
-     (file_id при этом разные)**\
-     Веб-ресурс помечает в БД старый файл как "deleted", а новый, как "actual" и "pending".
-     При этом старый файл удаляется, но запись о нём остаётся в БД
-   
-   #### Пример успешного цикла:
-   - 1С отправляет PDF → получает ссылку → генерирует QR по ссылке.
-   - 1С отправляет файл (тот же file_id) с QR → веб-сервис заменяет его и ставит fulfilled.
-   - Позже при новом издании (тот же document_id, другой file_id) веб-сервис помечает старый как deleted и сохраняет новый.
-   
-   #### Пример запроса
-   ```json
-   {
-     "file": "<BASE64_PDF>",
-     "document_id": "doc01",
-     "file_id": "id001",
-     "mime_type": "pdf"
-   }
-   ```
-   
-   #### Ответ (пример)
-   ```json
-   {
-     "message": "file saved (pending QR)",
-     "file_id": "id001",
-     "link": "https://originality-checker.onrender.com/publications/id001"
-   }
-   ```
+    
+    **Тело запроса (JSON):**
 
-2. `POST /api/upload`
-   #### Заголовки:
-   `Authorization: Bearer <STATIC_TOKEN>`
-   #### Тело запроса:
+    | Поле           | Тип данных | Required | Описание |
+    |----------------|------------|----------|----------|
+    | `file`         | string     | true     | PDF в base64|
+    | `document_id`  | string     | true     | Идентификатор документа |
+    | `file_id`      | string     | true     | Идентификатор файла (используется как имя файла на диске и как часть URL) |
+    | `mime_type`    | string     | false    | По умолчанию `pdf` |
 
-   | Поле           |  Тип данных  |  Required  |
-   |:---------------|:------------:|:----------:|
-   | `file`         | binary (PDF) |    true    |
-   | `document_id`  |    string    |    true    |
-   | `file_id`      |    string    |    true    |
+    **Запрос имеет 3 сценария:**
+    - **Первая публикация** (новые `document_id` + `file_id`)  
+      Создаётся запись `actual`, `status=pending` (QR-кода ещё нет).
+    - **Перезапись файла с тем же `file_id`**  
+      Файл перезаписывается на диске, статус может перейти в `fulfilled` (если это “вернули PDF с QR”).
+    - **Новая актуальная версия документа (тот же `document_id`, другой `file_id`)**  
+      Старая запись помечается как `deleted`, старый PDF удаляется физически, новая запись становится `actual` и `pending`.
 
-    #### Сценарии аналогичны `POST /api/upload-json`
+    **Пример запроса:**
+    ```json
+    {
+      "file": "<BASE64_PDF>",
+      "document_id": "doc01",
+      "file_id": "id001",
+      "mime_type": "pdf"
+    }
+    ```
 
-3. `GET /publications/:file_id`
+    **Ответ (пример):**
+    ```json
+    {
+      "message": "file saved (pending QR)",
+      "file_id": "id001",
+      "link": "https://originality-checker.onrender.com/publications/id001"
+    }
+    ```
+
+2. `GET /publications/:file_id`
    #### Заголовки:
    Отсутствуют (доступ открыт по прямой ссылке)
    #### Параметры запроса (передаются в url):
@@ -97,22 +116,14 @@ https://originality-checker.onrender.com
    | `file_id`      |    string    |    true    |
 
    #### Запрос имеет 3 сценария:
-   - **HTTP 200 OK**\
-     Если в таблице publications существует запись с данным file_id и file_type
-     == 'actual', то возвращается сам PDF-файл с заголовком Content-Type:
-     application/pdf
-   - **HTTP 410 Gone**\
-     Если запись существует, но `file_type == 'deleted'`, то возвращается текст:
-     - "*The printed form is not relevant*" — если в БД существует актуальная версия
-     этого документа (есть запись с таким же `document_id` и `file_type == 'actual'`).
-     - "*The printed form is not relevant, request a new commercial invoice.*" — если
-     актуальной версии документа нет (в БД нет записи с таким же `document_id` и
-     `file_type == 'actual'`).
-   - **HTTP 404 Not Found**\
-     Если записи с таким file_id нет вовсе → возвращается текст:
-     "*Printable form not found*"
+   - **HTTP 200 OK** — отдаётся PDF, если в БД есть запись `file_type='actual'` и файл существует на диске.
+   - **HTTP 410 Gone** — если запись есть, но `file_type='deleted'`, либо файл отсутствует физически.
+     Текст ответа:
+   - `"The printed form is not relevant"` — если для `document_id` существует актуальная версия (`file_type='actual'`).
+   - `"The printed form is not relevant, request a new commercial invoice"` — если актуальной версии нет.
+   - **HTTP 404 Not Found** — если записи с таким `file_id` нет → `"Printable form not found"`.
 
-4. `PATCH /api/publications/:file_id/delete`
+3. `PATCH /api/publications/:file_id/delete`
    #### Назначение:
    Помечает публикацию как неактуальную (soft delete) — меняет `file_type`
    на `'deleted'` в таблице `publications`.
@@ -138,7 +149,7 @@ https://originality-checker.onrender.com
       Если файл уже помечен как `deleted` → возвращается:
       `{ "error": "file already deleted" }`
 
-5. `GET /api/status/:file_id`
+4. `GET /api/status/:file_id`
    #### Назначение:
    Получение статуса и метаданных публикации по file_id.
    Используется для отладки и проверки корректности записей в БД.
@@ -156,7 +167,7 @@ https://originality-checker.onrender.com
    - Если записи нет, то возвращается **HTTP 404 Not Found**,
    { "error": "not found" }.
 
-6. `GET /api/logs`
+5. `GET /api/logs`
    #### Назначение:
    Возвращает список последних действий из таблицы logs.
    Используется для отладки или административного просмотра активности.
@@ -170,20 +181,15 @@ https://originality-checker.onrender.com
 ---
 
 ## Архитектура:
-- Установка соединения 1С с веб-ресурсом происходит по статическому `Bearer` токену,
-  сгенерированному через `crypto`
-- Веб-ресурс написан на `Express.js` (`Node.js`). API в основном выполнено в **RPC-стиле**
-  (командные эндпоинты для загрузки, получения статуса и пометки файла как неактуального),
-  при этом вынесен отдельный **публичный endpoint без авторизации** для доступа к файлу по QR-ссылке
-- Простое логирование через библиотеку `Morgan` с фильтрацией заголовка `authorization`, чтобы
-  токен не попадал в логи. В логах отображается кто когда какой запрос сделал, посредством
-  использования встроенного формата `morgan('combined')`. Вывод логов в консоль при локальной разработке.
-- Прием файлов поддерживает **два формата**:
-    - `multipart/form-data` через `multer` (legacy)
-    - `application/json` (файл в base64) для совместимости с 1С
+- Установка соединения 1С с веб-ресурсом происходит по статическому `Bearer` токену.
+- API в основном выполнено в **RPC-стиле**, при этом вынесен отдельный
+  **публичный endpoint без авторизации** для доступа к файлу по QR-ссылке
+- Логирование через `Morgan` с редактированием `Authorization`, чтобы токен не попадал в логи.
+- Rate-limit включён через `express-rate-limit`.
+- БД `sqlite3` хранится в файле `database.sqlite`.
 
+### Схема БД
 
-- БД `sqlite3`, хранящиеся в файле - `database.sqlite`:
 ```mermaid
 erDiagram
     %% Таблица публикаций (метаданные файлов)
